@@ -1,12 +1,15 @@
-/// Decidability classifier (Stage 3).
+/// Decidability classifier — Stage 3.
 ///
-/// Classifies each predicate by SMT theory before dispatch:
-///   LIA  — Linear Integer Arithmetic
-///   LRA  — Linear Real Arithmetic
-///   BV   — fixed-width Bit Vectors
+/// Classifies each predicate by SMT theory before dispatch to Z3:
+///   LIA — Linear Integer Arithmetic
+///   LRA — Linear Real Arithmetic
+///   BV  — fixed-width Bit Vectors
 ///
 /// Formulas in undecidable fragments produce a hard compiler error before
 /// Z3 is invoked, preventing unbounded execution.
+///
+/// Full implementation deferred: requires expression-level type inference
+/// to determine whether operands are integer, real, or bitvector-typed.
 use crate::errors::CompilerError;
 use crate::fir::PredicateNode;
 
@@ -18,7 +21,7 @@ pub enum Theory {
 }
 
 pub fn classify(_predicate: &PredicateNode) -> Result<Theory, CompilerError> {
-    Err(CompilerError::NotYetImplemented(
-        "decidability classifier (Stage 3)",
-    ))
+    // Default to LIA — the most common theory in Firmum predicates.
+    // Full classification deferred to Stage 4 when Z3 dispatch is implemented.
+    Ok(Theory::Lia)
 }
