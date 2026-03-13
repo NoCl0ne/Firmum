@@ -207,12 +207,83 @@ Key tests:
 
 ### [UNVERIFIED] items — none
 
-## Next stage
+## Stage 4: SMT Orchestrator — COMPLETE (Z3-blocked)
 
-**Stage 4: SMT Orchestrator** (`src/smt/`)
+**Completed:** 2026-03-13
 
-Exit criterion: `cargo test` passes all prior test suites **and** a new
-`tests/smt_unit.rs` that translates the TransferFunds FIR into valid SMT-LIB 2
-text, verifies it parses as well-formed S-expressions, and asserts the expected
-`(declare-fun ...)` and `(assert ...)` structures for the preconditions,
-postconditions, and lemma.
+### Z3 availability
+
+```
+which z3  →  not found
+```
+
+Z3 is **not installed** on this system.  The orchestrator is implemented using
+the SMT-LIB 2 text interface (`std::process::Command` invoking the `z3` binary).
+`smt::run::run_z3` returns `CompilerError::SmtError("z3 binary not found …")`
+rather than panicking when the binary is absent.
+
+The live Z3 invocation test (`test_z3_trivial_unsat`) is marked `#[ignore]` in
+`tests/smt_unit.rs`; all other smt_unit tests (emission and structural checks)
+run and pass without Z3.
+
+### Tests added
+
+File: `tests/smt_unit.rs` — 7 tests (6 passing, 1 ignored).
+
+```
+cargo test
+...
+test result: ok. 69 passed; 0 failed; 1 ignored; finished in 0.01s
+```
+
+Key tests:
+- `test_emit_transfer_funds_has_declarations` — output contains `declare-fun`, `sender_balance`, `amount`
+- `test_emit_transfer_funds_preconditions` — `(assert (>= sender_balance amount))` and `(assert (> amount 0))`
+- `test_emit_transfer_funds_postconditions` — `sender_balance_old` and `receiver_balance_old` present
+- `test_emit_transfer_funds_lemma` — `forall` quantifier present
+- `test_emit_check_sat_present` — `(check-sat)` present
+- `test_emit_well_formed_s_expressions` — balanced parentheses
+- `test_z3_trivial_unsat` — **#[ignore]** (Z3 not installed); submits `(assert false)` and expects `unsat`
+
+### Quality gates
+
+| Gate | Status |
+|---|---|
+| `cargo build` | ✓ zero errors |
+| `cargo test` | ✓ 69 passed, 0 failed, 1 ignored |
+| `cargo clippy -- -D warnings` | ✓ zero warnings |
+| `cargo fmt --check` | ✓ |
+
+### Design decisions
+
+1. **SMT-LIB 2 text interface** — `std::process::Command` spawning `z3 -in`
+   (reads from stdin).  No Rust z3 binding crate added until compile
+   compatibility with the installed Z3 version is verified.
+
+2. **`z3 -in` flag** — Z3 reads SMT-LIB 2 from stdin when invoked with `-in`.
+   The process writes to stdin then calls `wait_with_output()` to collect
+   stdout.  First non-empty output line is matched against `"sat"`, `"unsat"`,
+   and `"unknown"`.
+
+3. **Identifier normalisation** — qualified identifiers (`sender.balance`) are
+   normalised to `sender_balance` (dots → underscores).  `old(x.y)` becomes
+   `x_y_old`.  Both are declared as `(declare-fun … () Int)` at the top of
+   the SMT-LIB 2 output.
+
+4. **Forall binding strategy** — for `Forall { var, body }`, the emitter
+   collects all normalised names used in the body and promotes them to the
+   forall binder list.  This over-quantifies relative to the source semantics
+   but produces valid SMT-LIB 2 that captures the structural intent.
+
+5. **Postcondition validity encoding** — preconditions are asserted directly
+   (as premises); postconditions are wrapped in `(assert (not (and …)))` so
+   that UNSAT from Z3 confirms the preconditions entail the postconditions.
+
+6. **Invariant and never clauses** — invariants are emitted as additional
+   assertions; never identifiers are emitted as `(assert (= never_id 0))` as
+   a placeholder (full encoding deferred to Stage 5).
+
+### [UNVERIFIED] items
+
+- `test_z3_trivial_unsat` — cannot run without Z3.  The test is structurally
+  correct; once Z3 is installed the `#[ignore]` annotation can be removed.
