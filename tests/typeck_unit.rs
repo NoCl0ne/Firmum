@@ -8,9 +8,13 @@
 ///   5. TypeCheckError when old() appears in a precondition
 ///   6. ACS ≥ 0.70 for the full TransferFunds fixture
 ///   7. ACS = 0.0 when the assumption block has no edge cases and no strings
+///   8. TypeCheckError for cross-context arithmetic (contextual.rs)
+///   9. TypeCheckError for Fresh/Stale conflict (temporal.rs)
+///  10. decidability::classify returns Ok without panicking
 use firmum::parser::parse;
 use firmum::typeck;
 use firmum::typeck::acs;
+use firmum::typeck::decidability;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -145,6 +149,71 @@ proof Foo {
 /// Minimal assumption with no strings and no edge cases.
 const NO_ASSUMPTIONS: &str = r#"
 intent Foo {}
+assumption Foo {}
+proof Foo {
+  strategy: smt_solver(z3)
+  verify Foo {}
+}
+"#;
+
+/// Two contextual params with the SAME context — no conflict.
+const SAME_CONTEXT_PARAMS: &str = r#"
+intent Foo {
+  input:
+    a : Amount<Banking>
+    b : Amount<Banking>
+  postcondition:
+    a == b
+}
+assumption Foo {}
+proof Foo {
+  strategy: smt_solver(z3)
+  verify Foo {}
+}
+"#;
+
+/// Two contextual params with DIFFERENT contexts for the same base type.
+/// The postcondition compares them directly → cross-context arithmetic error.
+const CROSS_CONTEXT_PARAMS: &str = r#"
+intent Foo {
+  input:
+    a : Amount<Banking>
+    b : Amount<Crypto>
+  postcondition:
+    a == b
+}
+assumption Foo {}
+proof Foo {
+  strategy: smt_solver(z3)
+  verify Foo {}
+}
+"#;
+
+/// Two temporal params with the SAME state (both Fresh) — no conflict.
+const SAME_TEMPORAL_STATE: &str = r#"
+intent Foo {
+  input:
+    x : Fresh<LabResult, 24h>
+    y : Fresh<LabResult, 48h>
+  postcondition:
+    x == y
+}
+assumption Foo {}
+proof Foo {
+  strategy: smt_solver(z3)
+  verify Foo {}
+}
+"#;
+
+/// Fresh and Stale params of the same base type in one comparison → error.
+const STALE_WHERE_FRESH_REQUIRED: &str = r#"
+intent Foo {
+  input:
+    fresh_data : Fresh<LabResult, 24h>
+    stale_data : Stale<LabResult>
+  postcondition:
+    fresh_data == stale_data
+}
 assumption Foo {}
 proof Foo {
   strategy: smt_solver(z3)
@@ -346,4 +415,71 @@ proof B {
         score >= acs::THRESHOLD_PASS,
         "two covered declarations → ACS ≥ 0.70; got {score:.4}"
     );
+}
+
+// ── contextual type tests ──────────────────────────────────────────────────────
+
+#[test]
+fn test_contextual_same_context_ok() {
+    let prog = lower(SAME_CONTEXT_PARAMS);
+    assert!(
+        typeck::check(&prog).is_ok(),
+        "two params with the same context should pass contextual check"
+    );
+}
+
+#[test]
+fn test_contextual_cross_context_rejected() {
+    let prog = lower(CROSS_CONTEXT_PARAMS);
+    let err = typeck::check(&prog).expect_err("cross-context arithmetic must be a type error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Banking") && msg.contains("Crypto"),
+        "error should name both conflicting contexts; got: {msg}"
+    );
+}
+
+// ── temporal type tests ────────────────────────────────────────────────────────
+
+#[test]
+fn test_temporal_same_state_ok() {
+    let prog = lower(SAME_TEMPORAL_STATE);
+    assert!(
+        typeck::check(&prog).is_ok(),
+        "two Fresh params with the same base should pass temporal check"
+    );
+}
+
+#[test]
+fn test_temporal_stale_where_fresh_rejected() {
+    let prog = lower(STALE_WHERE_FRESH_REQUIRED);
+    let err = typeck::check(&prog).expect_err("Stale where Fresh is required must be a type error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Stale") || msg.contains("temporal"),
+        "error should mention temporal conflict; got: {msg}"
+    );
+}
+
+// ── decidability tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_decidability_classify_returns_value() {
+    // classify is a conservative stub that returns Theory::Lia for all predicates.
+    // This test verifies the function is callable and does not panic.
+    let prog = lower(MINIMAL_VALID);
+    // Use a comparison predicate from a lowered program if available,
+    // or construct one directly via the public FIR types.
+    use firmum::fir::{ComparisonOp, ExprNode, Number, PredicateNode};
+    let pred = PredicateNode::Comparison {
+        left: ExprNode::Number(firmum::fir::Number::Integer(0)),
+        op: ComparisonOp::Ge,
+        right: ExprNode::Number(Number::Integer(0)),
+    };
+    let result = decidability::classify(&pred);
+    assert!(
+        result.is_ok(),
+        "classify should return Ok for any predicate; got: {result:?}"
+    );
+    drop(prog);
 }

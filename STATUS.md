@@ -142,12 +142,12 @@ Key tests:
 
 ### Tests added
 
-File: `tests/typeck_unit.rs` — 12 tests, all passing.
+File: `tests/typeck_unit.rs` — 17 tests, all passing.
 
 ```
 cargo test
 ...
-test result: ok. 58 passed; 0 failed; 0 ignored
+test result: ok. 63 passed; 0 failed; 0 ignored
 ```
 
 Key tests:
@@ -162,13 +162,18 @@ Key tests:
 - `test_acs_one_unlinked_string_below_threshold` — unlinked string (W=0.10) < 0.70
 - `test_acs_formal_audit_high_confidence_linked` — formal_audit + ref → ACS = 1.0
 - `test_acs_multiple_declarations_pooled` — two linked declarations both pass
+- `test_contextual_same_context_ok` — two Amount<Banking> params → Ok(())
+- `test_contextual_cross_context_rejected` — Amount<Banking> vs Amount<Crypto> → Err
+- `test_temporal_same_state_ok` — two Fresh<LabResult> params → Ok(())
+- `test_temporal_stale_where_fresh_rejected` — Fresh<LabResult> + Stale<LabResult> → Err
+- `test_decidability_classify_returns_value` — classify returns Ok without panicking
 
 ### Quality gates
 
 | Gate | Status |
 |---|---|
 | `cargo build` | ✓ zero errors |
-| `cargo test` | ✓ 58 passed, 0 failed |
+| `cargo test` | ✓ 63 passed, 0 failed |
 | `cargo clippy -- -D warnings` | ✓ zero warnings |
 | `cargo fmt --check` | ✓ |
 
@@ -183,13 +188,22 @@ Key tests:
    prevents padding. The model is conservative: a single formal_audit linked
    string hits the threshold alone; unlinked strings stay below 0.70.
 
-3. **`contextual::check` and `temporal::check` deferred** — Both return `Ok(())`
-   to prevent false positives on valid programs. Full implementation requires
-   expression-level type inference and dataflow analysis (Stage 4 prerequisites).
+3. **`contextual::check` rejects cross-context arithmetic** — Detects when two
+   parameters with the same base type but different context tags (e.g.,
+   `Amount<Banking>` and `Amount<Crypto>`) appear together in the same predicate
+   comparison or verify-block expression.  Resolution by first identifier
+   segment; full expression-level type inference deferred to Stage 4.
 
-4. **`decidability::classify` returns `Theory::Lia`** — Safe default for all
-   predicates. Full theory inference requires operand type information available
-   only after contextual type checking is complete.
+4. **`temporal::check` rejects Fresh/Stale conflicts** — Detects when a
+   `Fresh<T, d>` parameter and a `Stale<T>` (or `Expiring<T, d>`) parameter
+   with the same inner base type appear together in the same expression.
+   Dataflow tracking across assignment boundaries is deferred to Stage 4.
+
+5. **`decidability::classify` returns `Theory::Lia` (conservative stub)** —
+   `Theory::Lia` (Linear Integer Arithmetic) is the safe default for all
+   predicates.  This prevents Z3 from being invoked on undecidable fragments
+   while full theory inference (which requires expression-level type information
+   available only after contextual type checking) is deferred to Stage 4.
 
 ### [UNVERIFIED] items — none
 

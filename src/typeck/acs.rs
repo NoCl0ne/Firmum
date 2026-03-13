@@ -44,6 +44,13 @@ pub fn compute(program: &Program) -> Result<f64, CompilerError> {
         numerator += assumption_contribution(&decl.assumption, e);
     }
 
+    // Clamp to [0.0, 1.0].  The raw numerator can exceed 1.0 when the
+    // traceability bonus (×1.15) combined with a high method weight and
+    // confidence pushes the first string above 1.0, e.g.:
+    //   document_review (0.80) × confidence 0.92 × 1.15 ≈ 0.847 per string,
+    //   plus a second string contributing 0.847/2 ≈ 0.424 → raw sum ≈ 1.27.
+    // Capping at 1.0 is intentional: no program should achieve an ACS above
+    // the maximum possible score regardless of how many strings are supplied.
     Ok(numerator.min(1.0))
 }
 
