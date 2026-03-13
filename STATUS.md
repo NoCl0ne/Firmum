@@ -76,18 +76,73 @@ user.name  = firmum-agent
 user.email = firmum-agent@localhost.invalid
 ```
 
+## Stage 2: FIR Lowering — COMPLETE
+
+**Completed:** 2026-03-13
+
+### Tests added
+
+File: `tests/lower_unit.rs` — 27 tests, all passing.
+
+```
+cargo test
+...
+test result: ok. 46 passed; 0 failed; 0 ignored
+```
+
+Key tests:
+- `test_lower_program_structure` — 1 context_decl, 0 lets, 1 declaration
+- `test_lower_context_decl` — field names, StringVal/Integer/Boolean values
+- `test_lower_intent_name_and_inputs` — name, input count, param names
+- `test_lower_intent_input_types` — Refined, Contextual type variants
+- `test_lower_intent_preconditions` / `test_lower_intent_postconditions` — comparison ops, BinOp sub-tree
+- `test_lower_assumption_context_source` / `test_lower_assumption_validated_by` — SourceRef, ValidatedByField
+- `test_lower_proof_strategy` — SmtSolverZ3 primary + BoundedModelChecking fallback
+- `test_lower_proof_lemma` — forall quantifier, Induction proof technique
+- `test_lower_proof_atomic_assigns` — SubAssign / AddAssign inside Atomic block
+- `test_lower_temporal_fresh` / `test_lower_temporal_stale` — TemporalType variants
+- `test_lower_predicate_and_or` / `test_lower_exists_quantifier` — predicate forms
+- `test_lower_let_binding_typed` / `test_lower_let_binding_refined` — LetBinding with type annotation
+
+### Quality gates
+
+| Gate | Status |
+|---|---|
+| `cargo build` | ✓ zero errors |
+| `cargo test` | ✓ 46 passed, 0 failed |
+| `cargo clippy -- -D warnings` | ✓ zero warnings |
+| `cargo fmt --check` | ✓ |
+
+### Design decisions
+
+1. **Span arithmetic for anonymous operators** — `+`, `-`, `*`, `/`, `+=`, `-=`, `=`
+   are anonymous string literals in the grammar and are not emitted as pairs.
+   The lowering pass recovers the operator text from the parent pair's `as_str()`
+   slice, using child span positions as byte offsets into that slice.
+
+2. **Text prefix for syntactic alternatives** — `temporal_type`, `strategy_name`,
+   and `proof_technique` use anonymous string alternatives within a named rule.
+   `pair.as_str().starts_with("Fresh"/"Stale"/…)` disambiguates without relying
+   on inner pairs, which are absent for pure-string alternatives.
+
+3. **Rule-type dispatch for `validated_by_field`** — The anonymous keyword
+   (`domain_expert`, `date`, `confidence`, `method`) preceding each value is not
+   emitted; only the value child is. The child's rule type (`string_literal`,
+   `date_literal`, `confidence_value`, `validation_method`) uniquely identifies
+   the alternative.
+
+4. **Left-fold for OR/AND chains** — `predicate_or` / `predicate_and` produce
+   inner pairs only for their child predicates (the anonymous `OR`/`AND` tokens
+   are invisible). The lowering pass folds left over those children to produce a
+   left-associative tree.
+
+### [UNVERIFIED] items — none
+
 ## Next stage
 
-**Stage 2: FIR Lowering** (`src/fir/lower.rs`)
+**Stage 3: Type Checker** (`src/typeck/`)
 
-Exit criterion: `cargo test` passes `tests/parse_examples.rs` **and** a new
-`tests/lower_unit.rs` that lowers the TransferFunds fixture to a `Program` FIR
-node and asserts correct field values (intent name, input count, assumption
-section types, proof strategy).
-
-Work to do:
-- Implement `fir::lower::lower(pairs)` — walk the pest Pairs tree and produce
-  `Program { contexts, lets, declarations }`.
-- Handle all grammar rules: `context_decl`, `let_stmt`, `declaration`,
-  and all sub-rules recursively.
-- Unit test the lowered AST field by field.
+Exit criterion: `cargo test` passes `tests/parse_examples.rs`, `tests/lower_unit.rs`,
+**and** a new `tests/typeck_unit.rs` that type-checks the lowered TransferFunds
+program and asserts: zero errors on a valid program; at least one error when
+intent/assumption/proof names mismatch; ACS score ≥ 0.70 for the full fixture.
