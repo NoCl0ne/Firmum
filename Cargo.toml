@@ -1,0 +1,33 @@
+[package]
+name = "firmum"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "AGPL-3.0-only"
+description = "A formal verification meta-language where proof is part of the syntax"
+
+[[bin]]
+name = "firmum"
+path = "src/main.rs"
+
+[lib]
+name = "firmum"
+path = "src/lib.rs"
+
+# All versions verified on crates.io 2026-03-13.
+[dependencies]
+# PEG parser — verified: pest 2.8.6, pest_derive 2.8.6
+pest        = "2.8.6"
+pest_derive = "2.8.6"
+# CLI — verified: clap 4.6.0
+clap = { version = "4.6.0", features = ["derive"] }
+# Serialisation — verified: serde 1.0.228, serde_json 1.0.149, toml 1.0.6
+serde      = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+toml       = "1.0.6"
+# Cryptography — sha2 0.10.8 is latest stable (0.11.x is RC, requires rust 1.85)
+sha2 = "0.10.8"
+# Ed25519 — 2.1.1 is latest stable (3.x is pre-release, requires rust 1.85)
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+# Parallelism — verified: rayon 1.11.0
+rayon = "1.11.0"
