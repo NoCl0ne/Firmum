@@ -518,9 +518,10 @@ intent TransferFunds {
   input:
     sender   : Account where balance >= 0
     receiver : Account where id != sender.id
-    amount   : Amount<Banking> where amount > 0
+    amount   : Amount<Banking>
   precondition:
     sender.balance >= amount
+    amount > 0
   postcondition:
     sender.balance   == old(sender.balance) - amount
     receiver.balance == old(receiver.balance) + amount
@@ -555,7 +556,7 @@ proof TransferFunds {
 
   lemma MoneyConservation {
     forall t: Transaction =>
-      old(sum(accounts.balance)) == sum(accounts.balance)
+      old(totalMoneyInSystem) == totalMoneyInSystem
     proof: induction on transaction_log
   }
 

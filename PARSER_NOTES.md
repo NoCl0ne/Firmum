@@ -29,13 +29,12 @@ From GRAMMAR.md:
 > section of the intent block. This keeps the grammar unambiguous and concentrates
 > all constraints in one visible location.
 
-**Note on the Complete Example in GRAMMAR.md line 521:**
-`amount : Amount<Banking> where amount > 0` is aspirational prose that illustrates
-the intended domain model; it does not parse with the current grammar. The
-precondition `amount > 0` must be written as a separate `precondition:` line
-(as shown in the test fixture `tests/parse_examples.rs`). This is a known
-discrepancy between the illustrative example and the current grammar rule, not
-a grammar bug.
+**Resolved spec erratum (fixed 2026-03-13):**
+The Complete Example previously used `amount : Amount<Banking> where amount > 0`.
+This does not parse: `refined_type` requires a bare identifier before `where`.
+The fix moves the constraint to the `precondition` section and updates the example
+to `amount : Amount<Banking>` with `amount > 0` as a separate predicate line.
+Applied in GRAMMAR.md, README.md, and firmum_arXiv_paper.txt.
 
 ---
 
@@ -45,9 +44,11 @@ a grammar bug.
 the argument to field references (`x`, `x.y`, `x.y.z`). Arbitrary expressions
 such as `old(func(x))` are not accepted. This is correct by design.
 
-**Note on the Complete Example in GRAMMAR.md line 558:**
-`old(sum(accounts.balance))` does not parse because `sum(accounts.balance)` is a
-`function_call`, not a `qualified_identifier`. This is a known discrepancy between
-the illustrative example and the current grammar rule. Postconditions using `old()`
-on field references (`old(sender.balance)`, lines 525–526 of the same example) are
-valid and parse correctly.
+**Resolved spec erratum (fixed 2026-03-13):**
+The Complete Example previously used `old(sum(accounts.balance)) == sum(accounts.balance)`
+inside `lemma MoneyConservation`. This does not parse: `old_expr` accepts only
+`qualified_identifier`, and `sum(accounts.balance)` is a `function_call`.
+The fix replaces the predicate with `old(totalMoneyInSystem) == totalMoneyInSystem`,
+which preserves the semantic intent (total money in the system is unchanged) using
+only a valid qualified identifier inside `old()`.
+Applied in GRAMMAR.md, README.md, and firmum_arXiv_paper.txt.
