@@ -1,0 +1,530 @@
+// ============================================================
+// Firmum Grammar  —  firmum.pest
+// File extension: .frm
+// Parser: pest.rs (PEG, v2.8+)
+// Encoding: UTF-8
+// ============================================================
+
+// ------------------------------------------------------------
+// Whitespace and comments — silent (ignored between tokens)
+// ------------------------------------------------------------
+
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+
+COMMENT = _{
+    "//" ~ (!"\n" ~ ANY)* ~ ("\n" | EOI)
+  | "/*" ~ (!"*/" ~ ANY)* ~ "*/"
+}
+
+// ------------------------------------------------------------
+// Reserved keywords — negative lookahead applied in `identifier`
+//
+// Pest has no native keyword reservation. The solution is a
+// compound negative lookahead in `identifier`: match only when
+// the next token is NOT a reserved keyword followed by
+// `keyword_boundary`. Without this, "intent" would be a valid
+// identifier and keywords could appear as variable names.
+//
+// Tokens intentionally excluded from this list:
+//
+//   time_unit tokens: "ms", "min", "s", "h", "d"
+//     Only appear after `number` in `duration` context.
+//     Disambiguated structurally — reservation would block
+//     identifiers such as "hour_count" or "days_since".
+//
+//   source_type tokens: "ref", "slack", "email", "github", "jira", "doc"
+//     Only appear in source_ref, always followed by "#".
+//     Reservation would block common identifiers such as
+//     "email_address", "doc_id", "github_user", "ref_id".
+// ------------------------------------------------------------
+
+/// All reserved keywords. Adding a token here propagates
+/// the reservation automatically to `identifier` and to every
+/// rule that reads identifier+ up to "}" (e.g. never_id).
+keyword = {
+    "intent" | "assumption" | "proof" | "input" | "output"
+  | "where" | "never" | "context" | "Fresh" | "Stale" | "Expiring"
+  | "old" | "forall" | "exists" | "assert" | "atomic"
+  | "strategy" | "verify" | "lemma" | "induction" | "certificate"
+  | "AND" | "OR" | "true" | "false" | "let"
+  | "in" | "using" | "with" | "fallback" | "type"
+  | "interview" | "document_review" | "formal_audit" | "peer_review"
+  | "smt_solver" | "bounded_model_checking" | "ai_assisted"
+  | "compile_time" | "validated_by" | "context_source" | "out_of_scope"
+  | "domain_expert" | "precondition" | "postcondition" | "invariant"
+}
+
+/// A word boundary: the character after the keyword is not
+/// alphanumeric or underscore. Ensures "input_amount" does not
+/// match as the keyword "input".
+keyword_boundary = _{ !(ASCII_ALPHANUMERIC | "_") }
+
+/// Identifiers reject every reserved keyword. The negative
+/// lookahead fires on keyword + boundary so that a keyword
+/// appearing as a prefix of a longer name (e.g. "invariant_count")
+/// is still accepted as an identifier.
+identifier = @{
+    !(keyword ~ keyword_boundary)
+  ~ ASCII_ALPHA
+  ~ (ASCII_ALPHANUMERIC | "_")*
+}
+
+// ============================================================
+// TOP-LEVEL
+// ============================================================
+
+/// A Firmum source file is a sequence of context_decl, let_stmt,
+/// and declaration entries in any order. Recommended convention:
+/// context_decl first, then declaration. let_stmt may appear
+/// between declarations for intermediate bindings.
+///
+/// A file containing only let_stmt or context_decl is syntactically
+/// valid but the type checker requires at least one declaration.
+program = { SOI ~ (context_decl | let_stmt | declaration)+ ~ EOI }
+
+/// The grammar enforces the sequence intent → assumption → proof.
+/// Every other ordering is a parse error — not a warning.
+///
+/// Type checker responsibilities (out of scope for PEG):
+///   - All three blocks must share the same identifier.
+///     "intent Foo {} assumption Bar {} proof Baz {}" parses
+///     but is a type error.
+///   - verify <id> must reference an intent declared in scope.
+declaration = {
+    intent_block
+  ~ assumption_block
+  ~ proof_block
+}
+
+// ============================================================
+// BASE LEXICAL RULES
+// ============================================================
+
+/// Supports escape sequences: \", \\, and \<any>.
+/// Without escapes, an embedded double-quote would terminate
+/// the string prematurely — a real failure mode in assumption
+/// strings, domain_expert fields, and any other free-text field.
+string_literal = @{ "\"" ~ (!("\"" | "\\") ~ ANY | "\\" ~ ANY)* ~ "\"" }
+
+integer = @{ ASCII_DIGIT+ }
+
+decimal = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+
+number = { decimal | integer }
+
+date_literal = @{
+    ASCII_DIGIT{4} ~ "-" ~ ASCII_DIGIT{2} ~ "-" ~ ASCII_DIGIT{2}
+}
+
+/// Boolean value — appears only in context_field.
+/// Not a type: "true" and "false" do not appear in type_expr.
+///
+/// keyword_boundary is required: without it, "trueness" would
+/// match "true" and leave "ness" in the buffer, producing a
+/// confusing error far from the problem site.
+boolean_literal = { ("true" | "false") ~ keyword_boundary }
+
+// ============================================================
+// TYPE EXPRESSIONS
+// ============================================================
+
+/// PEG ordered choice: temporal_type before contextual_type
+/// before dependent_type, because all three begin with
+/// identifier "<". Temporal types begin with reserved keywords
+/// (Fresh, Expiring, Stale) so they cannot match as identifier
+/// and are unambiguous. dependent_type before contextual_type
+/// because dependent_type has a second comma-separated parameter.
+type_expr = {
+    temporal_type
+  | contextual_type
+  | dependent_type
+  | refined_type
+  | base_type
+}
+
+base_type = { identifier }
+
+/// refined_type applies only to base types (identifiers).
+/// Constraints on compound types such as Fresh<T, d> or
+/// Amount<Banking> belong in the precondition section of the
+/// intent block. This keeps the grammar unambiguous and
+/// concentrates constraints in the most visible location.
+refined_type = { identifier ~ "where" ~ predicate_or }
+
+/// dependent_type requires exactly two parameters:
+///   Vec<T, n: Nat>
+/// A single-parameter form Vec<T> matches contextual_type.
+/// A dependent type without a value parameter has no semantic
+/// meaning in Firmum.
+dependent_type = {
+    identifier ~ "<" ~ type_expr ~ "," ~ identifier ~ ":" ~ base_type ~ ">"
+}
+
+/// contextual_type: Amount<Banking>
+/// Matched only after dependent_type fails (no comma + colon pair).
+contextual_type = { identifier ~ "<" ~ identifier ~ ">" }
+
+/// Three explicit temporal states:
+///   Fresh<T, 24h>     — data valid within duration d
+///   Expiring<T, 1h>   — data approaching expiry; requires explicit handling
+///   Stale<T>          — data past expiry; type error where Fresh is required
+///
+/// State transitions Fresh → Expiring → Stale are tracked by the
+/// type checker, not the grammar. Transition points are encoded
+/// as symbolic constants in Z3 during SMT-LIB emission.
+/// Expiring<T, d> cannot be silently passed where Fresh<T, d>
+/// is required.
+temporal_type = {
+    "Fresh"    ~ "<" ~ type_expr ~ "," ~ duration ~ ">"
+  | "Expiring" ~ "<" ~ type_expr ~ "," ~ duration ~ ">"
+  | "Stale"    ~ "<" ~ type_expr ~ ">"
+}
+
+duration = { number ~ time_unit }
+
+/// PEG ordered choice: "ms" before "s", "min" before any future
+/// "m"-prefixed unit. Order is load-bearing in an ordered-choice parser.
+time_unit = { "ms" | "min" | "s" | "h" | "d" }
+
+// ============================================================
+// PREDICATES — stratified by precedence
+//
+// Precedence from lowest to highest: OR < AND < atoms.
+// Stratification eliminates PEG ambiguity and left-recursion.
+// This is not a style choice; it is required for a correct PEG.
+// ============================================================
+
+predicate_or  = { predicate_and  ~ ("OR"  ~ predicate_and)* }
+predicate_and = { predicate_atom ~ ("AND" ~ predicate_atom)* }
+
+predicate_atom = {
+    "!" ~ predicate_atom
+  | "forall" ~ identifier ~ ":" ~ type_expr ~ "=>" ~ predicate_atom
+  | "exists" ~ identifier ~ ":" ~ type_expr ~ "=>" ~ predicate_atom
+  | "(" ~ predicate_or ~ ")"
+  | comparison
+}
+
+comparison = { expr ~ comparison_op ~ expr }
+
+/// "<=" before "<", ">=" before ">" — load-bearing ordering.
+/// If "<" were tried first, "<=" would parse as "<" + stray "=".
+comparison_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
+
+// ============================================================
+// EXPRESSIONS
+// ============================================================
+
+expr = { term ~ (("+"|"-") ~ term)* }
+
+term = { factor ~ (("*"|"/") ~ factor)* }
+
+/// function_call before qualified_identifier: both begin with
+/// identifier. The parser attempts function_call first; if no "("
+/// follows, the choice fails and qualified_identifier is tried.
+factor = {
+    number
+  | string_literal
+  | old_expr
+  | function_call
+  | qualified_identifier
+  | "(" ~ expr ~ ")"
+}
+
+/// old(x) references the value of x at the start of execution.
+/// Valid only inside postcondition and verify blocks — enforced
+/// by the type checker, not the grammar. The grammar accepts
+/// old() wherever a factor is valid; semantic rejection at the
+/// correct site produces a better diagnostic than grammar contortion.
+old_expr = { "old" ~ "(" ~ qualified_identifier ~ ")" }
+
+qualified_identifier = @{ identifier ~ ("." ~ identifier)* }
+
+function_call = { identifier ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
+
+// ============================================================
+// INTENT BLOCK
+// ============================================================
+
+/// Sections within intent_block are in fixed order enforced by
+/// the grammar. invariant_section is repeatable (invariant*) to
+/// allow multiple independent invariants without concatenating
+/// predicates.
+intent_block = {
+    "intent" ~ identifier ~ "{"
+  ~ input_section?
+  ~ output_section?
+  ~ precondition_section?
+  ~ postcondition_section?
+  ~ invariant_section*
+  ~ never_section?
+  ~ "}"
+}
+
+input_section  = { "input"  ~ ":" ~ param+ }
+output_section = { "output" ~ ":" ~ param+ }
+
+param = { identifier ~ ":" ~ type_expr }
+
+/// Negative lookahead for section-opening keywords in greedy rules.
+/// keyword_boundary is required on all word tokens: without it,
+///   "input" would block "input_amount"
+///   "invariant" would block "invariant_count"
+/// "}" needs no boundary — it is not an identifier.
+intent_section_kw = _{
+    ( "precondition"
+    | "postcondition"
+    | "invariant"
+    | "never"
+    | "input"
+    | "output"
+    ) ~ keyword_boundary
+  | "}"
+}
+
+precondition_section  = { "precondition"  ~ ":" ~ predicate_line+ }
+postcondition_section = { "postcondition" ~ ":" ~ predicate_line+ }
+invariant_section     = { "invariant"     ~ ":" ~ predicate_line+ }
+
+/// predicate_line guards against greedy predicate_or+ consuming
+/// the keyword that opens the next section or closes the block.
+predicate_line = { !intent_section_kw ~ predicate_or }
+
+/// never_id: !"}" is sufficient. All block and section keywords
+/// are in `keyword` — identifier rejects them already.
+/// Emergent property: adding any keyword to `keyword` automatically
+/// tightens never_id and every similar rule.
+never_id = { !"}" ~ identifier }
+
+never_section = { "never" ~ ":" ~ never_id+ }
+
+// ============================================================
+// ASSUMPTION BLOCK
+// ============================================================
+
+/// assumption_section entries are in free order.
+/// A fixed order would cause silent data loss: writing
+/// out_of_scope before context_source would parse successfully
+/// but lower the ACS score without a diagnostic.
+/// Duplicate sections (two context_source entries, etc.) are
+/// syntactically valid and reported as semantic errors by the
+/// type checker.
+assumption_block = {
+    "assumption" ~ identifier ~ "{"
+  ~ assumption_section*
+  ~ "}"
+}
+
+assumption_section = {
+    assumption_string
+  | context_source_section
+  | out_of_scope_section
+  | validated_by_section
+}
+
+assumption_string = { string_literal }
+
+context_source_section = { "context_source" ~ ":" ~ source_ref+ }
+
+/// source_ref is machine-readable by design.
+/// source_type determines how tooling resolves the path.
+///
+/// GDPR indirection: committed .frm files must use the "ref"
+/// source_type exclusively. "ref#<id>" is an opaque identifier
+/// whose mapping to real artefacts lives in the ContextRegistry —
+/// a separate, GDPR-scoped store. The compiler consumes only
+/// content hashes from the registry; it never reads referenced
+/// document text.
+///
+/// Structured types (slack, email, github, jira, doc) are
+/// accepted for local development and migration tooling but
+/// must not appear in source files entering a build pipeline.
+///
+/// Examples:
+///   ref#cs-42a9f1b3              — opaque registry reference (production)
+///   slack#payments-team/2024-03-14
+///   email#user@company.com/thread-id
+///   github#org/repo/issues/42
+///   jira#PROJ-1234
+///   doc#gdrive/document-id
+source_ref  = { source_type ~ "#" ~ source_path }
+
+/// "ref" must precede all other choices: it is the required
+/// production source_type in committed .frm files.
+source_type = { "ref" | "slack" | "email" | "github" | "jira" | "doc" }
+
+/// "@" is intentional for email-style references.
+/// Per-type path validation is a type checker / CLI responsibility.
+source_path = @{ (ASCII_ALPHANUMERIC | "-" | "_" | "/" | "." | "@")+ }
+
+out_of_scope_section = { "out_of_scope" ~ ":" ~ string_literal+ }
+
+/// "validated_by:" with no fields is syntactically valid.
+/// The compiler must emit an explicit warning: ACS contribution
+/// is zero and the developer may believe validation is satisfied.
+/// Fields are in free order. Duplicate fields are syntactically
+/// valid and reported as semantic errors.
+validated_by_section = {
+    "validated_by" ~ ":" ~ validated_by_field*
+}
+
+validated_by_field = {
+    ("domain_expert" ~ ":" ~ string_literal)
+  | ("date"          ~ ":" ~ date_literal)
+  | ("confidence"    ~ ":" ~ confidence_value)
+  | ("method"        ~ ":" ~ validation_method)
+}
+
+/// Grammar enforces syntactic form, not the [0.0, 1.0] range.
+///
+/// Invariant from grammar: value begins with "0" or "1".
+/// "2.5", "-0.1", "99" are immediate parse errors.
+///
+/// "1.999" is syntactically valid; the type checker rejects it
+/// with a precise diagnostic. Encoding the full range in the
+/// grammar would cause partial-match errors ("1." consumed,
+/// remaining text misattributed) — worse UX than a type error.
+confidence_value = @{ ("0" | "1") ~ ("." ~ ASCII_DIGIT*)? }
+
+/// Determines base weight W(aᵢ) in the ACS formula:
+///   formal_audit    → 1.00
+///   document_review → 0.80
+///   peer_review     → 0.60
+///   interview       → 0.35
+/// An unlinked string (no context_source) uses W = 0.10 regardless
+/// of method. A valid context_source ref applies a 1.15× traceability
+/// bonus to the effective weight.
+validation_method = {
+    "interview"
+  | "document_review"
+  | "formal_audit"
+  | "peer_review"
+}
+
+// ============================================================
+// PROOF BLOCK
+// ============================================================
+
+proof_block = {
+    "proof" ~ identifier ~ "{"
+  ~ strategy_decl
+  ~ lemma_decl*
+  ~ verify_decl+
+  ~ certificate_decl?
+  ~ "}"
+}
+
+strategy_decl = { "strategy" ~ ":" ~ strategy_expr }
+
+strategy_expr = {
+    strategy_name ~ ("with" ~ "fallback" ~ "(" ~ strategy_name ~ ")")?
+}
+
+/// "z3" is a string literal, not an identifier.
+/// smt_solver(z4) or any other name is a parse error.
+/// Extending solver support requires an explicit grammar change.
+///
+/// ai_assisted implements a CEGIS+LLM healing loop (planned):
+/// Z3 counterexample → LLM synthesizer → Z3 re-verification,
+/// max K=5 iterations. Human escalation after limit.
+/// Modules verified only by ai_assisted require explicit human
+/// approval before receiving an org_signature in production.
+strategy_name = {
+    "smt_solver" ~ "(" ~ "z3" ~ ")"
+  | "bounded_model_checking"
+  | "induction"
+  | "ai_assisted"
+}
+
+/// predicate_or+ safely terminates before proof_method because
+/// "proof" is reserved — identifier rejects it, so predicate_or
+/// cannot consume it. proof_method is always reachable when present.
+lemma_decl = {
+    "lemma" ~ identifier ~ "{"
+  ~ predicate_or+
+  ~ proof_method?
+  ~ "}"
+}
+
+proof_method = { "proof" ~ ":" ~ proof_technique }
+
+/// "contradiction" and "direct" are string literals, not symbol
+/// references. A lemma named "contradiction" or "direct" is
+/// syntactically valid (neither is in keyword) but the type
+/// checker should warn on names coinciding with proof_technique
+/// terms to avoid reading ambiguity.
+proof_technique = {
+    "induction" ~ "on" ~ identifier
+  | "contradiction"
+  | "direct"
+}
+
+verify_decl = {
+    "verify" ~ identifier ~ ("using" ~ identifier)?
+  ~ "{"
+  ~ verify_statement*
+  ~ "}"
+}
+
+verify_statement = {
+    assert_stmt
+  | atomic_stmt
+  | assign_stmt
+}
+
+assert_stmt = { "assert" ~ predicate_or }
+
+/// atomic{} carries transactional semantics. FIR lowering encodes
+/// atomicity as a linearisability assertion emitted to Z3 at each
+/// atomic boundary: all assignments apply or none apply.
+atomic_stmt = { "atomic" ~ "{" ~ verify_statement+ ~ "}" }
+
+assign_stmt = { qualified_identifier ~ ("+=" | "-=" | "=") ~ expr }
+
+/// The compiler generates the certificate at build time.
+/// The string literal in source is a placeholder.
+///
+/// The emitted ModuleCertificate is Ed25519-signed and contains:
+/// module_id, proof_hash, acs_score, verification_strategy,
+/// conservative_warning (if set), compiler_version, verified_at,
+/// z3_version, compiler_signature, org_signature (for production).
+///
+/// conservative_warning is part of the signed payload. It cannot
+/// be stripped without invalidating the signature. A production
+/// module loader rejects any module carrying this flag unless an
+/// explicit human-approval override is recorded.
+certificate_decl = {
+    "certificate" ~ ":" ~ string_literal
+  ~ "verified_at" ~ ":" ~ "compile_time"
+}
+
+// ============================================================
+// ADDITIONAL TOP-LEVEL DECLARATIONS
+// ============================================================
+
+/// Context declaration — defines named contexts for contextual types.
+///   type Amount in context Banking { unit: "USD" precision: 2 }
+/// Cross-context arithmetic is rejected by the type checker at
+/// the point of use. No manual cast exists.
+context_decl = {
+    "type" ~ identifier ~ "in" ~ "context" ~ identifier
+  ~ "{"
+  ~ context_field*
+  ~ "}"
+}
+
+/// context_field* terminates correctly by keyword reservation:
+/// identifier fails on "}" → context_field* stops → "}" closes
+/// the block. Same emergent property as never_id and let_stmt.
+context_field = {
+    identifier ~ ":" ~ (string_literal | number | boolean_literal)
+}
+
+/// let_stmt has no explicit terminator. Termination is safe as
+/// an emergent property of keyword reservation: expr is greedy
+/// but identifier rejects all reserved keywords. "let x = foo"
+/// followed by "intent Bar {}" terminates at "foo" because
+/// "intent" is in keyword.
+let_stmt = {
+    "let" ~ identifier ~ (":" ~ type_expr)? ~ "=" ~ expr
+}
