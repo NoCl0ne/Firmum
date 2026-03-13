@@ -1,0 +1,475 @@
+Firmum: A Programming Language Where Proof Is Part of the Syntax
+
+NoCl0ne
+Independent Developer
+github.com/NoCl0ne/firmum
+March 2026
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ABSTRACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This paper presents Firmum, a programming language designed to close the gap between
+what developers intend and what their code formally guarantees. The core observation
+is that most production failures in safety-critical domains are not caused by incorrect
+algorithms; they arise from implicit assumptions about the domain that were never
+recorded in a machine-readable form.
+
+Firmum makes undocumented assumptions a compile-time error. Every program must declare
+three things: what it intends to do (the INTENT block), what it assumes about its
+environment (the ASSUMPTION block), and a formal proof that the implementation satisfies
+the intent (the PROOF block). None are optional; the order is enforced by the grammar;
+any other sequence is a parse error.
+
+The language introduces four type-system features: refined types with inline predicates,
+dependent types for compile-time bounds safety, contextual types that make cross-domain
+confusion a type error, and temporal types in which data expiry is tracked across three
+states — Fresh, Expiring, Stale — with transitions encoded as symbolic constants in
+SMT-LIB 2. Verification is delegated to Z3 [8]. Predicates are stratified by
+precedence to admit correct PEG parsing without ambiguity.
+
+The language introduces the Assumption Coverage Score (ACS), a compiler-computed
+metric defined as ACS = Σᵢ [ W(aᵢ) · |map(aᵢ) ∩ E| ] / |E|, where E is the set of
+edge cases extracted statically from the intent block and W(aᵢ) is a weight determined
+by the validation method. Builds fail when ACS falls below configurable thresholds.
+Anti-Goodhart controls — semantic deduplication and novelty decay — prevent score
+inflation through assumption padding.
+
+Module certificates are Ed25519-signed structures containing the proof hash, ACS score,
+compiler version, Z3 version, and a conservative_warning flag. A three-level PKI
+hierarchy ensures that modules carrying conservative_warning cannot reach production
+without explicit human approval. Source references use GDPR-compliant opaque
+indirection via a ContextRegistry.
+
+The primary motivation is a growing class of structural errors in AI-generated code —
+errors that are syntactically correct and locally plausible but violate invariants or
+assumptions that were never made explicit [5, 6].
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. INTRODUCTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+There is a specific class of bug that passes every type check, never crashes at
+runtime, and still causes serious damage. A payment that debits one account but never
+credits the other. A medical prescription based on test results that expired two days
+ago. A security check that assumes input has been sanitized upstream when it has not.
+These bugs share a common structure: the algorithm is correct given its assumptions,
+but the assumptions were never written down anywhere a compiler could see them.
+
+Lahiri [6] identifies precisely this problem: software is accompanied by informal
+intent expressed in natural language, but these intents are seldom formally enforced
+on the underlying implementation. Firmum makes enforcement mandatory rather than
+advisory.
+
+The direction of this work is supported by a broader trend. Kleppmann [7] argues that
+AI will bring formal verification into the software engineering mainstream: the cost
+of proof-writing is falling as AI systems become capable of generating proof scripts,
+and AI-generated code requires formal verification precisely because human review
+cannot keep pace with generation speed. Endres et al. [5] identify the user-intent
+formalization problem: the specification is a formal artifact, but the intent is
+expressed informally in natural language, and there is no algorithmic way to ensure
+the two are aligned.
+
+Firmum is a response to both problems. It makes specification mandatory and is
+designed to work with AI both as a target language for code generation and as an
+assistant for proof construction.
+
+This paper establishes the design and invites discussion; the implementation is in
+progress. Section 2 surveys related work. Section 3 specifies the grammar formally.
+Section 4 describes the implementation architecture. Section 5 discusses evaluation
+targets. Section 6 concludes.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. RELATED WORK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dafny [1] is the closest prior work. It supports pre/postconditions and Z3
+verification. Annotations in Dafny are optional; there is no assumption block; there
+are no contextual or temporal types; there is no AI integration. Lahiri [6] uses Dafny
+as the evaluation target for user-intent formalization, which is precisely the gap
+Firmum addresses at the grammar level.
+
+TLA+ [2] is a formal specification language structurally disconnected from
+implementation. The spec is written in TLA+ and the code in another language; keeping
+them synchronised requires discipline, not tooling. Firmum colocates specification,
+assumption, and proof in a single compilable file, making drift a parse error.
+
+Liquid Haskell [4] provides refinement types and Z3 integration, and directly
+influenced the design of refined types in Firmum. It is Haskell-specific, has no
+assumption block, and requires expertise that has limited its adoption outside
+research.
+
+Idris [3] and Agda support powerful dependent type systems, but the expertise required
+has limited production adoption. Firmum adopts dependent types as one feature among
+four rather than as the organising principle of the type system, deliberately lowering
+the entry cost.
+
+The combination in Firmum — mandatory three-block syntax enforced at the grammar
+level; assumption block with free-order sections, structured source traceability,
+information-theoretic coverage scoring, and anti-Goodhart controls; contextual types;
+three-state temporal types with SMT encoding; a PKI-backed certificate chain with
+conservative_warning propagation; a planned CEGIS+LLM healing strategy; and GDPR-
+compliant source indirection — does not appear in any prior work identified.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. FORMAL SPECIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1 The Three Mandatory Blocks
+
+Every Firmum program is structured around three blocks. The grammar enforces the
+sequence intent → assumption → proof. All three share the same identifier. Any other
+order is a parse error.
+
+3.1.1 INTENT — The Formal Contract
+
+The INTENT block declares what the code promises. It contains typed input and output
+parameters with optional refinement predicates, preconditions, postconditions,
+invariants, and a never block for explicitly forbidden behaviors.
+
+  intent TransferFunds {
+    input:
+      sender   : Account where balance >= 0
+      receiver : Account where id != sender.id
+      amount   : Amount<Banking> where amount > 0
+    precondition:
+      sender.balance >= amount
+    postcondition:
+      sender.balance   == old(sender.balance) - amount
+      receiver.balance == old(receiver.balance) + amount
+    invariant:
+      totalMoneyInSystem == const
+    never:
+      partial_execution
+      silent_failure
+  }
+
+old(x) references the value of x at the start of execution, valid only inside
+postcondition and verify blocks. The never block accepts free identifiers; the
+registry of valid forbidden behaviors is defined by domain libraries, not the core
+grammar.
+
+3.1.2 ASSUMPTION — The Human Context Layer
+
+Every codebase makes assumptions invisible to any tool. Firmum requires these
+assumptions to be written down and linked to verifiable sources. Source references
+use GDPR-compliant opaque indirection: the .frm file contains opaque registry keys
+("ref#<id>"); the ContextRegistry (separate, GDPR-scoped, access-controlled) holds
+the mapping to real artefacts. The compiler consumes only SHA-256 content hashes;
+it never reads the text of referenced documents.
+
+  assumption TransferFunds {
+    "amount represents the base currency unit, not fractional"
+    "sender and receiver are distinct verified accounts"
+
+    context_source:
+      ref#cs-42a9f1b3
+      ref#cs-7d8c2e91
+
+    out_of_scope:
+      "multi-currency conversion"
+      "cross-border regulatory requirements"
+
+    validated_by:
+      domain_expert: "Compliance Lead"
+      date: 2024-03-15
+      confidence: 0.92
+      method: document_review
+  }
+
+The sections within an assumption block are in free order. A fixed section order
+would cause silent data loss: writing out_of_scope before context_source would parse
+successfully but lower the ACS score without a diagnostic.
+
+The method field documents how confidence was obtained: interview, document_review,
+formal_audit, or peer_review. These values determine the base weight W(aᵢ) in the
+ACS formula.
+
+3.1.3 PROOF — Formal Verification
+
+The PROOF block contains the demonstration that the code satisfies the intent.
+Verification is performed at compile time by translating Firmum predicates into
+SMT-LIB 2 formulas and submitting them to Z3 [8].
+
+  proof TransferFunds {
+    strategy: smt_solver(z3) with fallback(bounded_model_checking)
+    lemma MoneyConservation {
+      forall t: Transaction =>
+        old(sum(accounts.balance)) == sum(accounts.balance)
+      proof: induction on transaction_log
+    }
+    verify TransferFunds using MoneyConservation {
+      assert sender.balance >= amount
+      assert sender.id != receiver.id
+      atomic {
+        sender.balance   -= amount
+        receiver.balance += amount
+      }
+    }
+    certificate: "sha256:<compiler-generated>" verified_at: compile_time
+  }
+
+The certificate is an Ed25519-signed ModuleCertificate. See §4.3 for the signing
+hierarchy and the conservative_warning propagation protocol.
+
+3.2 The Type System
+
+3.2.1 Refined Types
+
+Refined types attach logical predicates to base types inline:
+
+  x: Int where x > 0 AND x < 1000
+
+The predicate is verified by the type checker, which translates it into an SMT-LIB
+formula and queries Z3 at the point of use. This concept appears in Liquid Haskell [4].
+Firmum makes it the default for all types rather than an advanced opt-in. Refined types
+apply only to base types; constraints on compound types belong in the precondition
+section.
+
+3.2.2 Dependent Types
+
+The type depends on a value known at compile time:
+
+  Vec<T, n: Nat>
+
+Accessing v[6] on a Vec<T, 5> is a compile-time type error. This eliminates a class
+of out-of-bounds vulnerabilities. A single-parameter form matches the contextual type
+rule; a dependent type without a value parameter has no semantic meaning in Firmum.
+
+3.2.3 Contextual Types
+
+The same type name can mean fundamentally different things in different domains.
+Contextual types make this confusion a compile-time error:
+
+  type Amount in context Banking { unit: "USD"     precision: 2 }
+  type Amount in context Crypto  { unit: "SATOSHI"  precision: 8 }
+
+  let a: Amount<Banking> = 100
+  let b: Amount<Crypto>  = 100
+  let c = a + b   // TYPE ERROR: context mismatch
+
+Cross-context operations are rejected at the point of use with no manual cast.
+
+3.2.4 Temporal Types
+
+Data has a shelf life. Temporal types make expiry part of the type system with three
+states: Fresh<T, d>, Expiring<T, d>, and Stale<T>. Transition points are encoded as
+symbolic constants in the SMT-LIB emission layer, allowing Z3 to reason about expiry
+conditions within proofs. Stale<T> where Fresh<T, d> is required is a compile-time
+type error. Expiring<T, d> requires explicit handling and cannot be silently passed as
+Fresh<T, d>.
+
+3.3 Assumption Coverage Score
+
+The ACS quantifies how well the declared assumptions cover the edge cases implied by
+the intent block. Let E be the set of edge cases extracted statically from the intent
+block by the following rules:
+
+  (1) Boundary rule: for each refined type predicate x OP k, extract x = k and
+      x = k ± ε.
+  (2) Forbidden behavior rule: each identifier in the never block generates one
+      edge case.
+  (3) Old-value delta rule: for each postcondition x == old(x) ± expr, extract
+      expr = 0, expr = MAX_TYPE, old(x) = 0.
+  (4) Context disjointness rule: for each pair of contextual parameters with the
+      same base type, one cross-context edge case.
+
+The score is:
+
+  ACS = Σᵢ [ W(aᵢ) · |map(aᵢ) ∩ E| ] / |E|
+
+where map(aᵢ) is the set of edge cases covered by assumption string aᵢ, and W(aᵢ)
+is the effective weight:
+
+  W(formal_audit)      = confidence × 1.00
+  W(document_review)   = confidence × 0.80
+  W(peer_review)       = confidence × 0.60
+  W(interview)         = confidence × 0.35
+  W(unlinked string)   = 0.10  (fixed; confidence ignored)
+
+A valid context_source ref#… reference applies a 1.15× traceability bonus. Build
+threshold policy:
+
+  ACS ≥ 0.70           → pass
+  ACS ∈ [0.50, 0.70)   → build error
+  ACS < 0.50           → hard error + mandatory human review gate
+
+Anti-Goodhart controls:
+
+  (1) Semantic deduplication: two assumption strings with cosine similarity > 0.90
+      are treated as a single assumption.
+  (2) Novelty decay: the n-th string covering the same edge case contributes
+      W(aₙ) / n.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. IMPLEMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1 Firmum Intermediate Representation (FIR)
+
+The compiler pipeline has five stages:
+
+  Lexer → PEG Parser → FIR Lowering → Type Checker → SMT Emission
+
+FIR is a typed IR that decouples the PEG grammar from the Z3 emission layer. Each
+stage has defined input and output types; the pipeline hard-stops on the first error
+rather than accumulating partial state.
+
+FIR encodes six node families: IntentNode, AssumptionNode, ProofNode, TypeNode,
+PredicateNode, and OwnershipNode. Ownership is encoded as a logical precondition, not
+a runtime check. Input parameters receive an implicit OwnershipNode; postconditions
+with old(x) generate a Move borrow encoding; invariants are asserted at every
+atomic block boundary with linearisability semantics.
+
+4.2 SMT Orchestrator and ProofCache
+
+The SMT Orchestrator dispatches verification jobs in topological dependency order.
+Per-module protocol:
+
+  (1) Compute canonical form; derive SHA-256 cache key
+      (keyed by compiler_version + z3_version).
+  (2) Query the ProofCache (content-addressed embedded key-value store).
+  (3) Cache hit: return stored certificate. The ACS check is not bypassed.
+  (4) Cache miss: submit SMT-LIB 2 formula to Z3 (default timeout: 30 seconds).
+  (5) Success: sign certificate; populate cache.
+  (6) Timeout: invoke Fallback Protocol (§4.5).
+
+Before invoking Z3, the type checker classifies each predicate by theory. Formulas
+belonging to undecidable fragments produce a hard compiler error before Z3 is called,
+preventing unbounded execution. Supported decidable theories: Linear Integer
+Arithmetic (LIA), Linear Real Arithmetic (LRA), fixed-width Bit Vectors (BV).
+
+4.3 Certificate PKI
+
+The emitted ModuleCertificate is an Ed25519-signed structure with the following
+fields: module_id, proof_hash, acs_score, verification_strategy,
+conservative_warning (optional), compiler_version, verified_at, z3_version,
+compiler_signature, org_signature.
+
+Three-level signing hierarchy:
+
+  Level 0 — Root CA: Ed25519, air-gapped; signs compiler and organisation keys.
+  Level 1 — Compiler signing key: per-release, HSM-backed.
+             Organisation signing key: team-controlled, rotatable.
+  Level 2 — Module certificate: signed by compiler key; production deployment
+             requires org key (dual-signature).
+
+The conservative_warning field is embedded in the signed payload. It cannot be
+stripped without invalidating the signature. A production module loader rejects any
+module carrying this flag unless an explicit human-approval override is recorded in
+the audit trail.
+
+4.4 AI-Assisted Verification (Planned)
+
+The ai_assisted strategy implements a CEGIS+LLM healing loop. Z3 produces a
+counterexample; the counterexample is passed to an LLM synthesizer that proposes a
+reformulation of the proof block; the reformulated block is re-submitted to Z3.
+This cycle repeats up to K = 5 iterations. If the limit is reached without a closed
+proof, the compiler writes a timeout escalation report (module_id, predicted complexity
+class, formula metrics, partial proof state, suggested decompositions, CEGIS
+availability) and the module escalates to the human fallback protocol.
+
+Modules verified only by ai_assisted cannot receive an org_signature without explicit
+human approval of the final reformulation. This is required for human oversight
+compliance applicable to high-risk AI systems [TO CITE: EU AI Act Annex III].
+
+4.5 GDPR Compliance and ContextRegistry
+
+context_source fields in .frm source files reference opaque registry keys
+("ref#<id>"). The ContextRegistry — separate from the repository, GDPR-scoped,
+access-controlled — holds the mapping from keys to real source artefacts, with a
+retention_policy and personal_data flag per entry. The compiler accesses only SHA-256
+content hashes from the registry; it never reads document text.
+
+Structured source type tokens (slack, email, github, jira, doc) are accepted by the
+grammar for local development and migration tooling. They must not appear in source
+files entering a build pipeline.
+
+4.6 Gradual Formalization
+
+Adoption does not require a full rewrite. Four integration levels:
+
+  Level 0 — Pure TypeScript. No Firmum tooling.
+  Level 1 — @firmum/annotate decorators on existing TypeScript functions. ACS check
+             in CI; no build block. Installable as an npm package.
+  Level 2 — .frm sidecar file alongside .ts. Binds to a function by name
+             (binds: "module.ts#functionName"); verifies without modifying source.
+  Level 3 — Native .frm with TypeScript codegen.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. EVALUATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Firmum is in early development. The grammar specification is complete; the reference
+implementation is in progress. No empirical benchmarks are available. Evaluation
+claims in this section are design targets; experimental validation will be reported
+once the implementation is complete.
+
+Target evaluation corpora:
+
+  stdlib/finance  — TransferFunds, BatchPayment, AuditLog, FXConversion,
+                    Reconciliation. Exit criterion: firmum build passes on all five
+                    with ACS ≥ 0.80 and zero conservative_warnings.
+
+  stdlib/medical  — PrescribeMedication, DrugInteractionCheck, DosageVerify,
+                    PatientConsent, LabResultExpiry.
+
+  stdlib/security — SanitizeInput, VerifyJWT, HashPassword, CheckCORS, AuditLog.
+
+The ACS thresholds (0.70 pass, 0.50 hard error) are design choices subject to
+calibration against the stdlib corpus and domain expert review. The thresholds are
+configurable; the minimum in production mode is 0.40.
+
+The SMT Orchestrator targets build time of O(log n × Z3_latency_max) for a monorepo
+of n modules after the first full build, assuming a ProofCache hit rate ≥ 90% for
+unchanged modules. This target follows from the parallel dispatch and content-addressed
+caching design; its achievement depends on the decidability classifier correctly
+bounding all emitted formulas to polynomial-complexity theories.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. CONCLUSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The gap between what we intend and what our code does has always existed. Bridging it
+formally was considered too expensive for production use: the tooling was too hard, the
+learning curve too steep, the runtime cost too high.
+
+That calculus is changing. AI systems generate code faster than humans can review it.
+Formal verification tools are fast enough for real projects. The assumption that
+developers will catch intent violations in code review is harder to sustain when much
+of the code is generated automatically.
+
+Firmum is an attempt to make the contract between human intent and machine behavior
+live in the source code, be verified at compile time, be impossible to skip, and be
+auditable by external parties through a PKI-backed certificate chain.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REFERENCES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[1] Leino, K. R. M. (2010). Dafny: An Automatic Program Verifier for Functional
+    Correctness. LPAR-16. Springer.
+
+[2] Lamport, L. (1994). The Temporal Logic of Actions. ACM Transactions on
+    Programming Languages and Systems, 16(3), 872–923.
+
+[3] Brady, E. (2013). Idris, a General Purpose Dependently Typed Programming
+    Language: Design and Implementation. Journal of Functional Programming,
+    23(5), 552–593.
+
+[4] Vazou, N., Seidel, E. L., Jhala, R., Vytiniotis, D., and Peyton-Jones, S.
+    (2014). Refinement Types for Haskell. ACM SIGPLAN Notices, 49(9), 269–282.
+
+[5] Endres, M., Fakhoury, S., Chakraborty, S., and Lahiri, S. K. (2023). Can Large
+    Language Models Transform Natural Language Intent into Formal Method
+    Postconditions? arXiv:2310.01831.
+
+[6] Lahiri, S. K. (2024). Evaluating LLM-driven User-Intent Formalization for
+    Verification-Aware Languages. arXiv:2406.09757.
+
+[7] Kleppmann, M. (2025). Prediction: AI will make formal verification go mainstream.
+    martin.kleppmann.com, December 8, 2025.
+
+[8] de Moura, L. and Bjorner, N. (2008). Z3: An Efficient SMT Solver. Tools and
+    Algorithms for the Construction and Analysis of Systems (TACAS). LNCS 4963,
+    337–340.
