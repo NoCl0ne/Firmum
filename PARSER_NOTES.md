@@ -1,45 +1,53 @@
 # Parser Notes
 
-Known limitations in `firmum.pest` as of Stage 1. These are grammar constraints,
-not bugs. They are documented here to inform test fixture authors and future grammar
-evolution.
+Behavioural properties of `firmum.pest` that test authors and future contributors
+should be aware of. All three are **intentional design decisions**, not open issues.
 
-## Limitation 1 — `boolean_literal` not in `factor`
+---
 
-`boolean_literal` (`true` / `false`) is defined and used only in `context_field`
-values. It does not appear in the `factor` rule, so `true` and `false` cannot appear
-inside predicate expressions.
+## 1 — `boolean_literal` is used only in `context_field`
 
-**Workaround:** Express boolean conditions via comparison, e.g. `flag == 1`.
+`boolean_literal` (`true` / `false`) appears exclusively in `context_field` values.
+It does not appear in `factor` and therefore cannot be used inside predicate
+expressions. This is correct by design.
 
-**Impact:** The type checker (Stage 3) cannot accept `true`/`false` as predicate
-terms. Boolean-valued predicates must be encoded as integer comparisons.
+From GRAMMAR.md:
+> `boolean_literal` is a value, not a type — it does not appear in `type_expr`
+> and is used only in `context_field`.
 
-## Limitation 2 — `contextual_type` and `refined_type` cannot combine
+---
 
-The grammar allows either `Amount<Banking>` (contextual) or
-`Amount where x > 0` (refined) for a parameter type, but not both together.
-`Amount<Banking> where amount > 0` is a parse error: the PEG matches
-`Amount<Banking>` as `contextual_type` and stops; the remaining `where amount > 0`
-is not consumed by any outer rule before `}`.
+## 2 — `refined_type` applies only to base types
 
-**Workaround:** Use `Amount<Banking>` as the parameter type and place
-`amount > 0` as a separate `precondition` line.
+`refined_type = { identifier ~ "where" ~ predicate_or }` requires a bare identifier
+before `where`. A `contextual_type` (`Amount<Banking>`) or any other compound type
+cannot appear in refined position. This is correct by design.
 
-**Grammar example in GRAMMAR.md §Complete Example** uses
-`amount : Amount<Banking> where amount > 0`, which is aspirational prose — the
-current grammar does not support it. The test fixture in
-`tests/parse_examples.rs` uses the corrected form.
+From GRAMMAR.md:
+> `refined_type` applies only to base types (identifiers). Constraints on compound
+> types such as `Fresh<T, d>` or `Amount<Banking>` belong in the `precondition`
+> section of the intent block. This keeps the grammar unambiguous and concentrates
+> all constraints in one visible location.
 
-## Limitation 3 — `old_expr` accepts only `qualified_identifier`
+**Note on the Complete Example in GRAMMAR.md line 521:**
+`amount : Amount<Banking> where amount > 0` is aspirational prose that illustrates
+the intended domain model; it does not parse with the current grammar. The
+precondition `amount > 0` must be written as a separate `precondition:` line
+(as shown in the test fixture `tests/parse_examples.rs`). This is a known
+discrepancy between the illustrative example and the current grammar rule, not
+a grammar bug.
 
-`old_expr = { "old" ~ "(" ~ qualified_identifier ~ ")" }`
+---
 
-Only `old(x)` or `old(x.y.z)` forms are valid. `old(func(x))` where the
-argument is a function call is a parse error.
+## 3 — `old_expr` accepts only `qualified_identifier`
 
-**Workaround:** Bind the result to a let-variable and reference the variable
-inside `old(…)`.
+`old_expr = { "old" ~ "(" ~ qualified_identifier ~ ")" }` intentionally restricts
+the argument to field references (`x`, `x.y`, `x.y.z`). Arbitrary expressions
+such as `old(func(x))` are not accepted. This is correct by design.
 
-**Impact:** The GRAMMAR.md lemma example `old(sum(accounts.balance))` does not
-parse. The test fixture replaces it with `old(acc.balance)`.
+**Note on the Complete Example in GRAMMAR.md line 558:**
+`old(sum(accounts.balance))` does not parse because `sum(accounts.balance)` is a
+`function_call`, not a `qualified_identifier`. This is a known discrepancy between
+the illustrative example and the current grammar rule. Postconditions using `old()`
+on field references (`old(sender.balance)`, lines 525–526 of the same example) are
+valid and parse correctly.

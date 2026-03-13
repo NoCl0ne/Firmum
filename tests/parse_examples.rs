@@ -1,25 +1,27 @@
 /// Parser integration tests.
 ///
 /// Exit criterion for Stage 1: the full TransferFunds example parses without
-/// error. Known grammar limitations (documented in PARSER_NOTES.md):
+/// error. Grammar behavioural properties (documented in PARSER_NOTES.md):
 ///
-///   1. `boolean_literal` is not in `factor` — true/false cannot appear in
-///      predicate expressions.
-///   2. `contextual_type` cannot be combined with a `where` predicate —
-///      `Amount<Banking> where x > 0` is a parse error. The predicate must
-///      be moved to `precondition`.
-///   3. `old_expr` only accepts `qualified_identifier` — `old(func(x))` is
-///      invalid; use `old(var.field)` instead.
+///   1. `boolean_literal` is used only in `context_field` — by design.
+///   2. `refined_type` applies only to base identifiers — by design.
+///      `Amount<Banking> where x > 0` is not valid syntax; the predicate
+///      belongs in `precondition`.
+///   3. `old_expr` accepts only `qualified_identifier` — by design.
 use firmum::parser::parse;
 
 /// TransferFunds adapted for the grammar as written in firmum.pest.
 ///
-/// Differences from the GRAMMAR.md §Complete Example:
-///   - `amount : Amount<Banking> where amount > 0`
-///     → `amount : Amount<Banking>` (grammar limitation 2)
-///     + `amount > 0` added as a separate precondition
-///   - `old(sum(accounts.balance))`
-///     → `old(acc.balance)` (grammar limitation 3)
+/// The GRAMMAR.md §Complete Example contains two illustrative lines that do
+/// not parse with the current grammar (known discrepancies documented in
+/// PARSER_NOTES.md):
+///   - Line 521: `amount : Amount<Banking> where amount > 0`
+///     → written here as `amount : Amount<Banking>` with `amount > 0`
+///     moved to a separate precondition line (design rule: refined_type is
+///     base-type only).
+///   - Line 558: `old(sum(accounts.balance))`
+///     → written here as `old(acc.balance)` (design rule: old_expr accepts
+///     qualified_identifier only, not function_call).
 const TRANSFER_FUNDS: &str = r#"
 type Amount in context Banking {
   unit:      "USD"
